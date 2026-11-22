@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Signallar</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root{
+    --bg:var(--tg-theme-bg-color,#0f1419);
+    --card:var(--tg-theme-secondary-bg-color,#1a212b);
+    --text:var(--tg-theme-text-color,#e8edf2);
+    --hint:var(--tg-theme-hint-color,#8a97a5);
+    --accent:var(--tg-theme-button-color,#2f81f7);
+    --accent-text:var(--tg-theme-button-text-color,#fff);
+    --up:#22c55e; --down:#ef4444;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font:15px/1.4 system-ui,sans-serif;
+       padding:12px 12px calc(16px + env(safe-area-inset-bottom,0px))}
+  h1{font-size:18px;margin:4px 0 10px}
+  .tabs{display:flex;gap:6px;margin-bottom:10px}
+  .tabs button{flex:1;padding:8px 0;border:0;border-radius:10px;background:var(--card);color:var(--text);font-size:14px}
+  .tabs button.on{background:var(--accent);color:var(--accent-text)}
+  .row{display:flex;align-items:center;justify-content:space-between;background:var(--card);
+       border-radius:12px;padding:10px 12px;margin-bottom:6px}
+  .sym{font-weight:600}
+  .sub{color:var(--hint);font-size:12px}
+  .badge{padding:4px 10px;border-radius:8px;font-weight:600;font-size:13px;min-width:74px;text-align:center}
+  .up{background:rgba(34,197,94,.18);color:var(--up)}
+  .down{background:rgba(239,68,68,.18);color:var(--down)}
+  .none{background:rgba(138,151,165,.15);color:var(--hint)}
+  .bar{display:flex;justify-content:space-between;color:var(--hint);font-size:12px;margin:8px 2px}
+  .act{width:100%;padding:11px;border:0;border-radius:10px;background:var(--accent);color:var(--accent-text);font-size:15px;margin-top:6px}
+  .act:disabled{opacity:.6}
+  #bt{margin-top:10px}
+  .warn{color:var(--hint);font-size:12px;margin-top:10px}
+  .ok{color:var(--up)} .bad{color:var(--down)}
+</style>
+</head>
+<body>
+<h1>📊 Signallar (RSI + Bollinger)</h1>
+<div class="tabs" id="tabs"></div>
+<div id="list"></div>
+<div class="bar"><span id="upd">…</span><span id="cd"></span></div>
+<button class="act" id="btn">Backtest (hamma aktiv)</button>
+<div id="bt"></div>
+<div class="warn">Bu moliyaviy maslahat emas. Signal kafolat bermaydi, natija tasodifiy bo’lishi mumkin.</div>
+
+<script>
+const tg = window.Telegram && Telegram.WebApp;
+if (tg) { tg.ready(); tg.expand(); }
+
+const BASE = "https://data-api.binance.vision";
+const SYMBOLS = ["BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT","DOGEUSDT","TRXUSDT","LTCUSDT","AVAXUSDT"];
+const TFS = ["1m","3m","5m","15m"];
+const RSI_LOW = 30, RSI_HIGH = 70, BREAKEVEN = 100 / 1.92;
+let tf = "1m", seen = {}, timer = null, left = 30;
+
+async function klines(sym, tf) {
+  const r = await fetch(`${BASE}/api/v3/klines?symbol=${sym}&interval=${tf}&limit=1000`);
+  if (!r.ok) throw new Error(r.status);
+  const j = await r.json();
+  return { close: j.slice(0, -1).map(k => +k[4]), t: j.slice(0, -2).length ? j[j.length - 2][0] : 0 };
+}
+
+function analyze(close) {
+  const n = close.length, rsi = new Array(n).fill(NaN), sig = new Array(n).fill(0);
+  let ag = 0, al = 0;
+  for (let i = 1; i < n; i++) {
+    const d = close[i] - close[i - 1], g = Math.max(d, 0), l = Math.max(-d, 0);
+    if (i === 1) { ag = g; al = l; } else { ag = ag * 13 / 14 + g / 14; al = al * 13 / 14 + l / 14; }
+    rsi[i] = al === 0 ? 100 : 100 - 100 / (1 + ag / al);
+  }
+  for (let i = 19; i < n; i++) {
+    let m = 0; for (let k = i - 19; k <= i; k++) m += close[k]; m /= 20;
+    let v = 0; for (let k = i - 19; k <= i; k++) v += (close[k] - m) ** 2;
+    const sd = Math.sqrt(v / 19), up = m + 2 * sd, lo = m - 2 * sd;
+    if (close[i] < lo && rsi[i] < RSI_LOW) sig[i] = 1;
+    else if (close[i] > up && rsi[i] > RSI_HIGH) sig[i] = -1;
+  }
+  return { rsi, sig };
+}
+
+function fmt(p) { return p >= 100 ? p.toFixed(2) : p >= 1 ? p.toFixed(4) : p.toFixed(6); }
+
+async function refresh() {
+  document.getElementById("upd").textContent = "Yangilanmoqda…";
+  const rows = await Promise.all(SYMBOLS.map(async s => {
+    try {
+      const { close, t } = await klines(s, tf);
+      const { rsi, sig } = analyze(close);
+      const i = close.length - 1;
+      return { s, p: close[i], rsi: rsi[i], sig: sig[i], t };
+    } catch (e) { return { s, err: true }; }
+  }));
+  const el = document.getElementById("list");
+  el.innerHTML = rows.map(r => {
+    if (r.err) return `<div class="row"><span class="sym">${r.s}</span><span class="badge none">xato</span></div>`;
+    const c = r.sig === 1 ? "up" : r.sig === -1 ? "down" : "none";
+    const txt = r.sig === 1 ? "YUQORI ▲" : r.sig === -1 ? "PAST ▼" : "yo’q";
+    return `<div class="row"><div><div class="sym">${r.s}</div><div class="sub">${fmt(r.p)} · RSI ${r.rsi.toFixed(1)}</div></div><span class="badge ${c}">${txt}</span></div>`;
+  }).join("");
+  let fresh = false;
+  rows.forEach(r => {
+    if (r.sig && seen[r.s + tf] !== r.t) { seen[r.s + tf] = r.t; fresh = true; }
+  });
+  if (fresh && tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred("success");
+  document.getElementById("upd").textContent = "Yangilandi: " + new Date().toLocaleTimeString();
+}
+
+async function backtest() {
+  const btn = document.getElementById("btn"), out = document.getElementById("bt");
+  btn.disabled = true; out.textContent = "Hisoblanmoqda…";
+  let N = 0, W = 0, html = "";
+  for (const s of SYMBOLS) {
+    try {
+      const { close } = await klines(s, tf);
+      const { sig } = analyze(close);
+      let n = 0, w = 0;
+      for (let i = 0; i < close.length - 1; i++) {
+        if (sig[i]) { n++; if (sig[i] * (close[i + 1] - close[i]) > 0) w++; }
+      }
+      N += n; W += w;
+      html += `<div class="row"><span class="sym">${s}</span><span>${n} ta · ${n ? (w / n * 100).toFixed(1) : "–"}%</span></div>`;
+    } catch (e) { html += `<div class="row"><span class="sym">${s}</span><span>xato</span></div>`; }
+  }
+  const wr = N ? W / N * 100 : 0;
+  const cls = wr > BREAKEVEN ? "ok" : "bad";
+  html = `<div class="row"><b>Jami (${tf})</b><b class="${cls}">${N} ta · ${wr.toFixed(1)}%</b></div>` + html +
+    `<div class="warn">Zararsizlik chegarasi (92% to’lovda): ${BREAKEVEN.toFixed(1)}%. ` +
+    (N < 100 ? "Signallar 100 tadan kam, natijaga ishonib bo’lmaydi." : "") + `</div>`;
+  out.innerHTML = html; btn.disabled = false;
+}
+
+function drawTabs() {
+  const el = document.getElementById("tabs"); el.innerHTML = "";
+  TFS.forEach(t => {
+    const b = document.createElement("button");
+    b.textContent = t; b.className = t === tf ? "on" : "";
+    b.onclick = () => { tf = t; drawTabs(); left = 30; refresh(); };
+    el.appendChild(b);
+  });
+}
+
+drawTabs(); refresh();
+setInterval(() => {
+  left--; document.getElementById("cd").textContent = left + " s";
+  if (left <= 0) { left = 30; refresh(); }
+}, 1000);
+document.getElementById("btn").onclick = backtest;
+</script>
+</body>
+</html>
